@@ -1,0 +1,323 @@
+---
+title: "SHAP_Analysis_Tutorial"
+author: "Taylor C. Powell"
+date_created: "2025-02-13"
+output: html_document
+---
+
+*__ HELLO! __*
+
+A *brief* explanation of R Markdown files for the uninitiated:
+  R Markdown files are "dynamic" files that provide intuitive methods for creating interactive documents.
+  They typically consist of plain-text sections and sections of runnable code, often referred to as chunks.
+  They can then be "knitted" into HTML files (or PDF or Word files) where their interactive elements can be engaged with.
+  R Markdowns are really cool, and I encourage you to explore more of what they have to offer <https://rmarkdown.rstudio.com/>
+
+
+*__ LOAD PACKAGES __*
+  
+This first code chunk is the setup chunk. It contains all the packages needed for this tutorial.
+They will automatically load when any part of the analysis is ran.
+
+```{r package setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# This package adds data aggregation functions
+# Link: <https://cran.r-project.org/web/packages/reshape2/index.html>
+if(!require(reshape2)){
+    install.packages("reshape2")
+    library(reshape2)
+}
+
+# This package adds tools for working with data frames
+# Link: <https://cran.r-project.org/web/packages/dplyr/index.html>
+if(!require(dplyr)){
+    install.packages("dplyr")
+    library(dplyr)
+}
+
+# This package adds string manipulation functions
+# Link: <https://cran.r-project.org/web/packages/stringr/index.html>
+if(!require(stringr)){
+    install.packages("stringr")
+    library(stringr)
+}
+
+# The following packages contain everything we'll need for the SHAP analysis
+# Read more about the main package here: <https://persimune.github.io/explainer>
+# GitHub link: <https://github.com/PERSIMUNE/explainer/blob/main/vignettes/articles/explainer_tutorial_multiclass.Rmd>
+if (!require(explainer)){
+    install.packages("explainer")
+    library(explainer)
+}
+
+if(!require(mlbench)){
+    install.packages("mlbench")
+    library(mlbench)
+}
+
+if(!require(mlr3learners)){
+    install.packages("mlr3learners")
+    library(mlr3learners)
+}
+
+if(!require(ranger)){
+    install.packages("ranger")
+    library(ranger)
+}
+
+if(!require(iml)){
+  install.packages("iml")
+  library(iml)
+}
+
+if(!require(forcats)){
+  install.packages("forcats")
+  library(forcats)
+}
+
+if(!require(psych)){
+  install.packages("psych")
+  library(psych)
+}
+
+if (!require(rsvg)){
+  install.packages("rsvg")
+  library(rsvg)
+}
+
+if (!require(ggimage)){
+  install.packages("ggimage")
+  library(ggimage)
+}
+
+if (!require(plotly)){
+  install.packages("plotly")
+  library(plotly)
+}
+```
+
+
+*__ INTRO __*
+
+Our goal is to see if a SHAP analysis model trained on RSCU data can identify genes from a user-defined metabolic pathway.
+
+For the purposes of this tutorial, we'll be using the same S. Cerevisiae data from the *Module_learning_Tutorial.Rmd*
+
+Before continuing, make sure that the files *saccharomyces_cerevisiae.final.cds.all_codonTable.out.csv_RSCU.csv* and *saccharomyces_cerevisiae.txt* are in the same directory/folder as this tutorial file. 
+
+If for some reason you don't have these files, let one of us know.
+
+Once the files are in the right location, run the code chunk below to load the data we'll be using.
+
+```{r load data}
+# Load in RSCU data for the S. Cerevisiae genome
+
+# Note, the separator between each column is a comma, so we'll need to accommodate for that
+rscu_data<-read.delim("saccharomyces_cerevisiae.final.cds.all_codonTable.out.csv_RSCU.csv", sep = ",")
+
+# There's no header in this file, so set that parameter to false
+kegg_data<-read.delim("saccharomyces_cerevisiae.txt", header=F)
+```
+
+
+*__ DATA REFORMATTING __*
+
+Now, in order to work effectively with this data, we'll have to do some preliminary reformatting.
+
+We want to take our two data sets and combine them into one data set, one with rows for each unique KEGG, columns for each codon, and their corresponding RSCU values in the remaining cells.
+
+The chunk below should perform this reformatting step by step. Make sure to pay attention to each line of code to see what it does.
+
+```{r reformat data}
+# Be sure to look at each line of R code one-by-one to understand what it does. Type them out in the console if that helps
+# You can also use ctrl+enter to run individual lines of code. Just make sure your cursor is on the line you wish to run
+
+# 1. Change the names of the genes in rscu_data so that they match the names of the genes in kegg_data
+rscu_data$Sequence<-str_replace(rscu_data$Sequence, pattern = "saccharomyces_cerevisiae.", replacement = "")
+
+
+# 2. Change the column names so that the two lists have matching column names
+colnames(kegg_data)<-c("Sequence","KEGG")
+
+
+# 3. Join the lists together to make one large data set. 
+# If this step gives you a warning, you can safely ignore it.
+rscu_data<-left_join(kegg_data, rscu_data)
+
+
+# 4. Clear unneeded data
+rm(kegg_data)
+
+
+# 5. Convert the data from a "long" format to a "wide" format
+# For an explanation of long vs. wide format: <https://libguides.princeton.edu/R-reshape>
+# Side note, some KEGGs reference multiple genes. In those cases, we want to take the median RSCU value for each codon from those genes
+rscu_data<-dcast(rscu_data, formula=KEGG ~ Codon, value.var ="RSCU", fun.aggregate = median)
+
+
+# 6. Finally, remove all stop codons
+rscu_data<-subset(rscu_data, select=-c(TAA,TAG,TGA))
+
+```
+
+
+*__ ANALYSIS PREP __*
+
+Now we're ready to begin the first stages of the SHAP analysis!
+
+We'll be piloting this with the autophagy pathway.
+  pathway: <https://www.genome.jp/pathway/sce04138>
+
+The code chunk below prepares a pathway data set for running the SHAP analysis.
+
+Once again, go through each line of code one-by-one to understand what it does.
+
+```{r analysis prep}
+
+# Put each KEGG from the autophagy pathway into an array
+autoph_pathway<-c("K20178","K15296","K08341","K06027","K08333","K08335","K21156","K08336","K05757","K06902","K17900","K17260","K20183","K04382","K17907","K04382","K07756","K21144","K00654","K20184","K00915","K09243","K16196","K12761","K20177","K09464","K01336","K21157","K12767","K17908","K12479","K20195","K21158","K08269","K08502","K04464","K21197","K08337","K07204","K19800","K05754","K04345","K21141","K03237","K18584","K07203","K18083","K05755","K16314","K09468","K14209","K04345","K08516","K07203","K08338","K20181","K21145","K00914","K05756","K20182","K08329","K17909","K07897","K17606","K09468","K08340","K08493","K20179","K00654","K08266","K07827","K14209","K08342","K17906","K08343","K05758","K01336","K07827","K21155","K06655","K20180","K17908","K08334","K08339","K01381","K21143","K04345","K17607","K08330","K08331")
+
+
+# Make a copy of the rscu_data data set. We'll be using this copy for our analysis
+autoph_data<-rscu_data
+
+
+# Add a new column to autoph_data called "presence" and initialize each row as 'absent'
+autoph_data$presence<-"absent"
+
+
+# For all KEGGs from autoph_data in the autophagy pathway, set the pathway value to 'present'
+autoph_data$presence[autoph_data$KEGG %in% autoph_pathway]<-"present"
+
+
+```
+
+Now we have a data set that contains all of the RSCU values associated with each KEGG from *saccharomyces_cerevisiae.txt*
+Additionally, each of those KEGGs is now marked as either belonging to the autophagy pathway or not.
+
+
+*__ SHAP ANALYSIS __*
+
+Let's run the analysis. (Finally!)
+
+```{r shap analysis}
+
+# Set a randomizer seed for experiment reproducibility
+seed1 = 123
+set.seed(seed1)
+
+
+# Generate subsets of equal size from autoph_data, one for KEGGs that are absent and one for KEGGs that are present
+present<-subset(autoph_data, presence=="present")
+absent<-subset(autoph_data, presence=="absent")
+absent<-absent[sample(nrow(absent), nrow(present)), ]
+
+
+# Generate and format an input data set by combining the present/absent subsets
+input_data<-rbind(absent, present)
+input_data$presence<-as.factor(input_data$presence)
+input_data <- input_data[,-1]
+
+
+# Specify target column and positive class
+# By specifying the presence column as the target class, we'll be able to use the SHAP model to
+# estimate which codons are most important for determining whether a KEGG is absent or
+# present in the autophagy pathway
+target_col <- "presence"
+positive_class <- "present"
+
+
+# Create a classification task
+# This is one of the required inputs for the SHAP plotting function
+main_task <- mlr3::TaskClassif$new(
+  id = "Main_Task",
+  backend = input_data,
+  target = target_col,
+  positive = positive_class
+)
+
+
+# Randomly split the data set into two partitions
+# One partition will be used for training the model, the other will be used for the analysis
+partitions <- mlr3::partition(main_task, ratio=c(0.09, 0.9))
+
+
+# Create a ranger learner and train it using the training partition from above
+# Essentially, the learner object helps guide the predictions of the SHAP analysis
+# There are various types of learners, each with their own specific use-cases
+# For more details on these, type "?mlr_learners" into the R console
+ranger_learner <- mlr3::lrn("classif.ranger", predict_type = "prob")
+ranger_learner$train(main_task, partitions$train)
+
+
+# Generate SHAP values and plot them
+SHAP_output <- eSHAP_plot_multiclass(
+  task = main_task,
+  trained_model = ranger_learner,
+  splits = partitions,
+  sample.size = 60,
+  seed = seed1,
+  subset = 0.8
+)
+
+```
+
+So.. what does these SHAP plots tell us?
+
+For starters, we can see that there are two plots, one for each class of features. The top plot is for KEGGs that are present in the autophagy pathway, and the bottom plot is for KEGGs that are absent.
+
+Each class has a set of features (codons in this case), with each feature having associated SHAP values and feature values.
+
+The SHAP values give us a measure of the *importance* of each feature. In this case, a codon with a high SHAP value would indicate that it's "important" for predicting whether a KEGG is absent or present in the autophagy pathway.
+
+The feature values give us a measure of the RSCU value associated with each codon. In this case, a feature value of 1 (red) would indicate that the codon has a high RSCU value, while a value of 0 (blue) would indicate otherwise. 
+
+
+*__ CONCLUSION __*
+
+So, now that we have our SHAP plot, how can it help us identify genes in S. Cerevisiae's autophagy pathway?
+
+Let's start by taking a look at the plot for the present class. 
+
+Take note of the codon with the *highest* absolute SHAP value. What is its feature value?
+
+```
+Class=present
+
+Codon with highest SHAP val: [type answer here] 
+Feature val of above codon: [type answer here]
+```
+
+From this, we can infer that KEGGs containing that specific codon with that specific RSCU value are important for determining whether that KEGG is present in the autophagy pathway.
+
+Let's take a look at the absent class now. 
+
+Find the codon with the *lowest* absolute SHAP value. What is its feature value?
+
+```
+Class=absent
+
+Codon with lowest SHAP val: [type answer here] 
+Feature val of above codon: [type answer here]
+```
+
+From this, we can infer that KEGGs containing that specific codon with that specific RSCU value are not important for determining whether that KEGG is absent from the autophagy pathway. 
+
+And that's pretty much it!
+
+
+*__ FUTURE DIRECTIONS __*
+
+From here, I encourage you to copy this markdown file and play around with it. 
+
+Maybe run the analysis multiple times, and then average the values you receive into one large meta-analysis.
+
+Maybe run the analysis on different genes, using the KEGGs and associated RSCU values from those genes.
+
+Maybe play with the partitioning functions and subsetting functions to get varying sets of training and test data.
+
+Maybe run the multiple analyses on multiple genes, and then compare the results of those analyses.
+
+And there's much more you can do! Good luck!
+
