@@ -21,12 +21,11 @@ The example dataset used here is derived from **Saccharomyces cerevisiae** codon
 
 ## 📂 Repository Structure
 
+├── LICENSE<br>
+├── README.md<br>
 ├── SHAP_Analysis_Tutorial.Rmd<br>
 ├── saccharomyces_cerevisiae.final.cds.all_codonTable.out.csv_RSCU.csv<br>
-├── saccharomyces_cerevisiae.txt<br>
-├── LICENSE<br>
-└── README.md<br>
-
+└── saccharomyces_cerevisiae.txt<br>
 
 ### Key Files
 
